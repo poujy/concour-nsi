@@ -7,16 +7,18 @@ import gzip
 from datetime import *
 
 
-url_communes = "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/troph%C3%A9e%20nsi/jsonCommunes.json"
-response = requests.get(url_communes)
-communes = response.json()
-villes = [commune["nom_standard_majuscule"] for commune in communes]
+url_villes = "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/troph%C3%A9e%20nsi/villes.json"
+response = requests.get(url_villes)
+villes_data = response.json()
 
-with open(r"\\LSOR-FILER\eleves$\gtomasino\Documents\trophe_nsi\data\stockage.json", "r", encoding="utf-8") as f:                            #fichier json contenant les plantes et leurs infos
-    data = json.load(f)                                                                                                                 # JSON directement converti en dictionnaire Python
+url_stockage = "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/troph%C3%A9e%20nsi/stockage(3).json"
+response = requests.get(url_stockage)
+data = response.json()                                                                                                                 # JSON directement converti en dictionnaire Python
 
-with open(r"\\LSOR-FILER\eleves$\gtomasino\Documents\trophe_nsi\data\compteur.json", "r", encoding="utf-8") as f:                            #json qui contient le nombres de plantes que l'utilisateur as
-    compteur = json.load(f)                                                                                                             # JSON directement converti en dictionnaire Python                                                                                                # JSON directement converti en dictionnaire Python
+url_compteur = "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/troph%C3%A9e%20nsi/compteur.json"
+response = requests.get(url_compteur)
+compteur = response.json()
+# JSON directement converti en dictionnaire Python                                                                                                # JSON directement converti en dictionnaire Python
 
 url= "http://api.weatherapi.com/v1/forecast.json?key= 741a648e81bf44c28d7122536251410&q=Paris,France&days=14&aqi=no&alerts=no"          #api meteo url
 response = requests.get(url)                                                                                                            # JSON directement converti en dictionnaire Python
@@ -62,7 +64,7 @@ def verif_climat_plante(nom_villes):
 
     # Recherche de la ville dans le fichier villes.json
     ville = None
-    for v in villes["villes"]:                              # parcour toute les villes jusqu'a trouver la ville demandé
+    for v in villes_data["villes"]:                              # parcour toute les villes jusqu'a trouver la ville demandé
         if v["nom_ville"] == nom_villes:
             ville = v
             break
@@ -204,7 +206,6 @@ app = CTk()
 app.geometry("360x640")
 set_appearance_mode("dark")
 app.title("DigiGrow")
-app.iconbitmap("data/DigiGrow.ico")
 
 # Frame principale
 main_frame = CTkFrame(master=app)
@@ -219,7 +220,7 @@ search_entry = None
 combobox = None
 
 # BUG CORRIGÉ : extraction de la liste des noms de villes depuis le dict JSON
-noms_villes = [v["nom_ville"] for v in villes["villes"]]
+noms_villes = [v["nom_ville"] for v in villes_data["villes"]]
 
 
 # Fonction pour changer le contenu
@@ -233,20 +234,8 @@ def afficher_home(nom):
 
         label = CTkLabel(master=content_frame, text="Selectionnez votre ville", font=("Arial", 20))
         label.pack(pady=100)
-        #filter_combobox , def qui permet a la combobox contenant les villes de s'adapter en fonction de la recherche souhaité
-        def filter_combobox(*args):
-            typed = search_var.get().lower()    #la recherche présente dans la combobox "search_var" est recupéré et assigné sur la valeur "typed"
-            filtered = [v["nom_ville"] for v in villes["villes"] if typed in v["nom_ville"].lower()]    #la liste des villes présente sur le json est parcouru et le nom de chaques villes est assigné a la valeur filtered , filtered contien donc le nom de chaque villes
-            combobox.configure(values=filtered)     #les villes sont definis comme des valeurs selectionnables dans la combobox
-            if filtered:        #par defaut la villes definit par defaut devient le premier de la liste
-                combobox.set(filtered[0])       #"Rouen"
-            else:               #sinon la combobox s'adapte a la recherche
-                combobox.set("")
+        #filter_combobox , def qui permet a la combobox contenant les villes de s'adapter en fonction de la recherche souhait
 
-
-        search_entry = CTkEntry(master=content_frame, textvariable=search_var, placeholder_text="Tapez une ville...")
-        search_entry.pack(pady=5)
-        search_var.trace_add("write", filter_combobox)
 
         # BUG CORRIGÉ : values=noms_villes (liste de str) au lieu de values=villes (dict)
         combobox = CTkComboBox(master=content_frame, values=noms_villes, state="readonly")
@@ -279,14 +268,23 @@ def afficher_home(nom):
         btn_home = CTkButton(master=content_frame, text="VALIDER", width=200, command=action_valider)
         btn_home.pack(pady=20)
 
-def contenu2(nom):
-    global search_entry, combobox
+def page_ajout_plante():
+    global combobox_plantes_dispo
 
-    # Supprime le contenu précédent
+    if combobox_plantes_dispo is not None:
+        combobox_plantes_dispo.destroy()
+
+    combobox_plantes_dispo = CTkComboBox( master=content_frame, values=selection_plante, state="readonly")
+    combobox_plantes_dispo.pack(pady=5)
+
+combobox_plantes_dispo = None
+
+def contenu2(nom):
+    global search_entry, combobox, combobox_plantes_dispo
+
     for widget in content_frame.winfo_children():
         widget.destroy()
 
-    # Supprime Entry et Combobox s'ils existent
     if search_entry is not None:
         search_entry.destroy()
         search_entry = None
@@ -294,41 +292,22 @@ def contenu2(nom):
         combobox.destroy()
         combobox = None
 
+    combobox_plantes_dispo = None
+
     if nom == "Plants":
+        titre_plante = CTkLabel(master=content_frame, text="Votre Jardin", font=("Arial", 20))
+        titre_plante.pack(pady=100)
 
-        label = CTkLabel(master=content_frame, text="Votre Jardin", font=("Arial", 20))
-        label.pack(pady=100)
+        selection_plante = verif_climat_plante(valeur)
+        combobox_plantes_dispo = CTkComboBox(master=content_frame, values=selection_plante, state="readonly", width=200)
+        combobox_plantes_dispo.pack(pady=5)
+        combobox_plantes_dispo.set("Choisissez une plante...")
 
-        def ajouter_plante():
-            global selection_plante
-            selection_plante = (verif_climat_plante(valeur))
-            page_ajout_plante()
-
-
-        btn_ajouter_plante = CTkButton(master=content_frame, text="Ajouter Plante", width=200, command=ajouter_plante)
+        btn_ajouter_plante = CTkButton(master=content_frame, text="Ajouter Plante", width=200,command=lambda: print(combobox_plantes_dispo.get()))
         btn_ajouter_plante.pack(pady=20)
 
-    #    combobox_plantes = CTkComboBox(master=content_frame, values=)
-    elif nom == "Handbook":
-        label = CTkLabel(master=content_frame, text="Manuel des plantes", font=("Arial", 20))
-        label.pack(pady=100)
 
-    elif nom == "Plants":
-        label = CTkLabel(master=content_frame, text="Vos plantes", font=("Arial", 20))
-        label.pack(pady=100)
 
-    elif nom == "Stats":
-        label = CTkLabel(master=content_frame, text="Statistiques", font=("Arial", 20))
-        label.pack(pady=100)
-
-    elif nom == "Settings":
-        label = CTkLabel(master=content_frame, text="Paramètres", font=("Arial", 20))
-        label.pack(pady=100)
-
-def page_ajout_plante():
-
-    combobox_plantes_dispo = CTkComboBox( activate_scrollbars=False,master=content_frame, values=selection_plante, state="readonly")
-    combobox_plantes_dispo.pack(pady=5)
 
 
 afficher_home("Home")
@@ -343,6 +322,3 @@ app.mainloop()
 ############################################################################################################################################################################################################
 
 ################################test le script#######################################
-
-
-#thread pour executer plusieurs calculs a la fois
