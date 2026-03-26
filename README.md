@@ -1,0 +1,1 @@
+pour exécuter l'application il faut exécuter le fichier "main.py" (projet_nsi/ sur une version python 3.13 ou + . Si le script ne fonctionne pas vérifier que les modules python suivant sont bien installé : request, json, time, threading, datetime, requests, customtkinter.
