@@ -1,4 +1,5 @@
 
+
 import json
 import time
 import threading
@@ -11,13 +12,11 @@ from customtkinter import *
 #  Chargement des données distantes
 # ─────────────────────────────────────────────────────────────────────────────
 
-BASE_URL = "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/troph%C3%A9e%20nsi"
-
 # On charge les 3 fichiers JSON depuis GitHub au démarrage.
 # .json() convertit directement la réponse HTTP en dictionnaire Python.
-villes_data = requests.get(f"{BASE_URL}/villes.json").json()
-data        = requests.get(f"{BASE_URL}/stockage(3).json").json()
-compteur    = requests.get(f"{BASE_URL}/compteur.json").json()
+villes_data = requests.get(f"https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/villes.json").json()
+data        = requests.get(f"https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/stockage.json").json()
+compteur    = requests.get(f"https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/compteur.json").json()
 
 METEO_URL = (
     "http://api.weatherapi.com/v1/forecast.json"
