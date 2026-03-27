@@ -132,7 +132,7 @@ def _climat_compatible(plante: dict, ville: dict) -> bool:
 
 #  Gestion du jardin (compteur)
 
-def incrémenter_compteur(nom_plante: str) -> int:
+def incrementer_compteur(nom_plante: str) -> int:
     compteur_instances[nom_plante] = compteur_instances.get(nom_plante, 0) + 1
     return compteur_instances[nom_plante]
 
@@ -234,7 +234,7 @@ def surveiller_hydratation(nom_numerote: str) -> None:
 
 def enregistrer_et_surveiller(nom_plante: str, stade: str) -> str:
     """Numérote la plante, l'ajoute au jardin et lance son thread de surveillance."""
-    num = incrémenter_compteur(nom_plante)
+    num = incrementer_compteur(nom_plante)
     nom_numerote = f"{nom_plante}{num}"
     inscrire_plante_au_jardin(nom_plante, nom_numerote, stade)
     threading.Thread(target=surveiller_hydratation, args=(nom_numerote,), daemon=True).start()
