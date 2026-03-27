@@ -1,128 +1,244 @@
+import json
+import os
 import time
 import threading
+import math
 from datetime import date
+from typing import List, Tuple, Optional
 import requests
 from customtkinter import *
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  Chargement des données distantes
+#  Chargement des fichiers JSON
 # ─────────────────────────────────────────────────────────────────────────────
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
-# Les trois fichiers de référence sont récupérés au démarrage depuis GitHub.
-# .json() convertit directement la réponse HTTP en dictionnaire Python.
-villes_data = requests.get(
-    f"https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/villes.json").json()
-data = requests.get(f"https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/stockage.json").json()
+
+def lire_fichier_json(nom_fichier: str) -> dict:
+    chemin = os.path.join(DATA_DIR, nom_fichier)
+    with open(chemin, encoding="utf-8") as f:
+        return json.load(f)
+
+
+villes_data = lire_fichier_json("villes.json")
+catalogue   = lire_fichier_json("stockage.json")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Appel API météo (WeatherAPI)
+# ─────────────────────────────────────────────────────────────────────────────
 
 METEO_URL = (
     "http://api.weatherapi.com/v1/forecast.json"
     "?key=741a648e81bf44c28d7122536251410"
-    "&q=Paris,France&days=14&aqi=no&alerts=no")
-meteo_response = requests.get(METEO_URL)
-# Code 200 = réponse OK. Si l'API est indisponible ou la clé invalide,
+    "&q=Paris,France&days=14&aqi=no&alerts=no"
+)
 
-meteo = meteo_response.json() if meteo_response.status_code == 200 else None
+_reponse_meteo = requests.get(METEO_URL)
+meteo = _reponse_meteo.json() if _reponse_meteo.status_code == 200 else None
 
 if meteo is None:
-    print("Erreur lors du téléchargement des données météo :", meteo_response.status_code)
+    print("Erreur météo :", _reponse_meteo.status_code)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  État de l'application (données en mémoire)
+#  Codes météo WeatherAPI → libellé français
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Jardin de l'utilisateur : liste de dicts, chacun représentant une plante ajoutée.
-jardin = {"plantes": []}
+CODES_METEO = {
+    1000: "Ensoleillé",        1003: "Partiellement nuageux", 1006: "Nuageux",
+    1009: "Couvert",           1030: "Brumeux",               1063: "Pluie possible",
+    1066: "Neige possible",    1069: "Grésil possible",       1072: "Bruine verglaçante possible",
+    1087: "Orages possibles",  1114: "Tempête de neige",      1117: "Blizzard",
+    1135: "Brouillard",        1147: "Brouillard givrant",    1150: "Bruine légère",
+    1153: "Bruine fine",       1168: "Bruine verglaçante",    1171: "Bruine verglaçante forte",
+    1180: "Pluie légère",      1183: "Pluie légère",          1186: "Pluie modérée",
+    1189: "Pluie modérée",     1192: "Pluie forte",           1195: "Pluie forte",
+    1198: "Pluie verglaçante", 1201: "Pluie verglaçante forte",
+    1204: "Grésil léger",      1207: "Grésil fort",           1210: "Neige légère",
+    1213: "Neige légère",      1216: "Neige modérée",         1219: "Neige modérée",
+    1222: "Neige forte",       1225: "Neige forte",           1237: "Grêle",
+    1240: "Averses légères",   1243: "Averses fortes",        1246: "Averses torrentielles",
+    1249: "Averses de grésil", 1252: "Averses de grésil fort",
+    1255: "Averses de neige",  1258: "Averses de neige forte",
+    1261: "Averses de grêle",  1264: "Averses de grêle forte",
+    1273: "Pluie et orages",   1276: "Pluie forte et orages",
+    1279: "Neige et orages",   1282: "Neige forte et orages",
+}
 
-# Compteur d'instances par espèce, pour numéroter les plantes
-compteur_plantes = {}
 
-# Ville choisie au démarrage, utilisée pour filtrer les plantes compatibles
-ville_active = None
+def traduire_code_meteo(current: dict) -> str:
+    code = current.get("condition", {}).get("code", None)
+    if code is None:
+        return "Inconnue"
+    return CODES_METEO.get(code, f"Code {code}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  État global de l'application
+# ─────────────────────────────────────────────────────────────────────────────
 
-def get_saison(d: date) -> str:
-    """Retourne la saison correspondant au mois de la date passée en paramètre."""
-    mois = d.month
-    if mois in (12, 1, 2):
-        return "hiver"
-    if mois in (3, 4, 5):
-        return "printemps"
-    if mois in (6, 7, 8):
-        return "ete"
+jardin             = {"plantes": []}   # plantes actives de l'utilisateur
+compteur_instances = {}                # { "Rose": 2, "Carotte": 1, ... }
+ville_active       = None
+nb_arrosages       = 0                 # arrosages d'urgence depuis le lancement
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Conseils culturaux par plante (Handbook)
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONSEILS = {
+    "Carotte":      "Semez en sol meuble et profond. Éclaircissez à 5 cm pour obtenir de belles racines. Arrosez régulièrement pour éviter les fourches.",
+    "Pommedeterre": "Plantez les tubercules-graines en buttes et buttez régulièrement. Évitez l'excès d'humidité qui favorise la pourriture.",
+    "Rose":         "Taillez après chaque floraison. Arrosez toujours au pied pour prévenir l'oïdium. Un apport de compost au printemps garantit une belle floraison.",
+    "Tulipe":       "Plantez les bulbes en automne, pointe vers le haut. Laissez le feuillage sécher naturellement après floraison pour reconstituer les réserves.",
+    "Courgette":    "Plant gourmand en eau et en soleil. Récoltez jeune (15-20 cm) pour stimuler la production. Un seul pied suffit souvent pour une famille.",
+    "Concombre":    "Palissez les tiges pour économiser de l'espace. Maintenez une humidité constante du sol pour éviter l'amertume des fruits.",
+    "Poivron":      "Aime la chaleur. En climat tempéré, démarrez les plants en intérieur. Arrosez en profondeur plutôt que souvent.",
+    "Aubergine":    "Exige chaleur et plein soleil. Pincez les tiges pour favoriser la ramification. Attendez que la peau soit bien brillante avant de récolter.",
+    "Haricot":      "Ne semez pas avant que le sol soit bien réchauffé. Inutile de fertiliser : la plante fixe elle-même l'azote atmosphérique.",
+    "Petits pois":  "Semez tôt, ils supportent un léger gel. Palissez les tiges. Récoltez régulièrement pour prolonger la production.",
+    "Salade":       "Évitez la chaleur qui fait monter en graines. Arrosez le matin pour limiter les risques de maladies foliaires.",
+    "Épinard":      "Préfère les saisons fraîches. Monte vite en graines dès que les jours rallongent : choisissez des variétés à montaison lente.",
+    "Chou":         "Exige beaucoup d'eau et d'espace. Protégez des chenilles de la piéride avec un voile fin. Buttez le pied pour le stabiliser.",
+    "Oignon":       "Arrêtez l'arrosage quand les fanes tombent : c'est le signal de la récolte. Faites sécher les bulbes avant de les stocker.",
+    "Ail":          "Plantez les caïeux en automne, pointe vers le haut. Récoltez quand les fanes jaunissent. Tressez et suspendez pour la conservation.",
+    "Poireau":      "Transplantez en jabot pour blanchir le fût. Buttez progressivement en cours de culture pour un résultat optimal.",
+    "Radis":        "Culture ultra-rapide (3-4 semaines). Semez toutes les deux semaines pour étaler la récolte. Évitez les sols compactés.",
+    "Betterave":    "Semez par bouquets et éclaircissez à 10 cm. Les jeunes feuilles se cuisinent comme des épinards.",
+    "Céleri":       "Culture longue, très gourmande en eau. Buttez progressivement les tiges pour les blanchir si vous cultivez le céleri-branche.",
+    "Tomate":       "Ébourgeonnez et palissez régulièrement. Arrosez strictement à la base pour éviter les maladies foliaires. Attendez la pleine maturité sur pied.",
+    "Menthe":       "Invasive : plantez en pot ou posez une barrière dans le sol. Très robuste. Divisez les touffes tous les 2 ans.",
+    "Basilic":      "Pincez les fleurs pour prolonger la récolte de feuilles. Craint le froid et les courants d'air. Arrosez par le bas.",
+    "Thym":         "Très rustique et peu exigeant. Taille légère après floraison. Supporte bien les périodes de sécheresse une fois établi.",
+    "Romarin":      "Arbrisseau persistant résistant. Taille après floraison. Redoute l'excès d'eau en hiver, surtout en pot.",
+    "Ciboulette":   "Repousse bien après coupe. Divisez les touffes tous les 2-3 ans. Les fleurs mauves sont comestibles et décoratives.",
+    "Persil":       "Germination lente (3 semaines). Faites tremper les graines 24h avant le semis. Arrosez régulièrement.",
+    "Origan":       "Récoltez avant la pleine floraison pour un arôme maximal. Tolère bien la sécheresse estivale.",
+    "Sauge":        "Taillez après floraison pour éviter la lignification. Préfère un sol bien drainé. Propriétés digestives reconnues.",
+    "Estragon":     "Préférez l'estragon français pour sa saveur. Moins aromatique séché que frais : utilisez-le de préférence frais ou congelé.",
+    "Coriandre":    "Monte vite en graines par forte chaleur. Semez en successions. Les graines sèches sont une épice à part entière.",
+    "Laurier":      "Arbuste persistant très robuste. Taille de forme au printemps. Séchez les feuilles à l'ombre pour préserver les arômes.",
+    "Aneth":        "Ne pas planter près du fenouil (risque d'hybridation). Monte vite en graines. Récoltez feuilles et graines séparément.",
+    "Cerfeuil":     "Préfère la mi-ombre. Monte vite en graines par chaleur : privilégiez les semis précoces ou automnaux.",
+    "Marjolaine":   "Plus douce que l'origan. Séchez à l'ombre pour conserver les arômes. Préfère les sols calcaires bien drainés.",
+}
+
+
+def conseil_pour_plante(nom: str) -> str:
+    return CONSEILS.get(
+        nom,
+        f"Plantez votre {nom} dans un sol adapté à ses besoins en chaleur et en humidité. "
+        "Consultez les indicateurs d'arrosage de l'application pour un suivi précis."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Saison et filtrage climatique
+# ─────────────────────────────────────────────────────────────────────────────
+
+def saison_du_jour(d: date) -> str:
+    m = d.month
+    if m in (12, 1, 2): return "hiver"
+    if m in (3, 4, 5):  return "printemps"
+    if m in (6, 7, 8):  return "ete"
     return "automne"
 
 
-def verif_climat_plante(nom_ville: str) -> list[str]:
-    """Retourne la liste des plantes plantables dans la ville selon la saison actuelle."""
-    # next(..., None) parcourt la liste et renvoie le premier élément qui correspond
-    # ou None si aucun ne correspond
+def plantes_compatibles_ville(nom_ville: str) -> List[str]:
     ville = next((v for v in villes_data["villes"] if v["nom_ville"] == nom_ville), None)
     if ville is None:
         return []
-
-    saison = get_saison(date.today())
-
-    # On garde uniquement les plantes dont la saison courante est True et dont le climat est compatible avec celui de la ville sélectionnée
-    plantes_dispo = [
-        plante["nom_courant"]
-        for plante in data["plantes"]
-        if plante[saison] and correspond_climat(plante, ville)
+    saison = saison_du_jour(date.today())
+    return [
+        p["nom_courant"]
+        for p in catalogue["plantes"]
+        if p[saison] and _climat_compatible(p, ville)
     ]
-    return plantes_dispo
 
 
-def correspond_climat(plante: dict, ville: dict) -> bool:
-    """Vérifie si le climat d'une plante est compatible avec celui de la ville."""
-    types_climat = ("oceanique", "mediterraneen", "continental", "oceanique_altere", "montagnard")
-    # any() s'arrête au premier True : la plante est compatible si elle partage au moins un type de climat avec la ville.
-    return any(plante[c] == ville[c] for c in types_climat)
+def _climat_compatible(plante: dict, ville: dict) -> bool:
+    types = ("oceanique", "mediterraneen", "continental", "oceanique_altere", "montagnard")
+    return any(plante[c] == ville[c] for c in types)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Gestion du compteur et du jardin
+#  Gestion du jardin
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compte(nom_plante: str) -> int:
-    """Incrémente et retourne le numéro d'instance de l'espèce dans le jardin."""
-    # .get() retourne 0 si la clé n'existe pas encore, puis on ajoute 1.
-    compteur_plantes[nom_plante] = compteur_plantes.get(nom_plante, 0) + 1
-    return compteur_plantes[nom_plante]
+def incrémenter_compteur(nom_plante: str) -> int:
+    compteur_instances[nom_plante] = compteur_instances.get(nom_plante, 0) + 1
+    return compteur_instances[nom_plante]
 
 
-def ajouter_plante(nom_plante: str, nom_numerote: str) -> list:
-    """Ajoute une entrée plante dans le jardin en mémoire."""
+def inscrire_plante_au_jardin(nom_plante: str, nom_numerote: str, stade: str) -> list:
     jardin["plantes"].append({
-        "nom_numéroté": nom_numerote,
-        "nom_courant": nom_plante,
-        "eau_deja_presente": 0,
+        "nom_numéroté":      nom_numerote,
+        "nom_courant":       nom_plante,
+        "stade":             stade,
+        "eau_deja_presente": 0.0,
     })
     return jardin["plantes"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Calcul de l'arrosage
+#  Calcul de l'arrosage et estimation du prochain
 # ─────────────────────────────────────────────────────────────────────────────
 
-MULTIPLICATEURS_STADE = {
+FACTEURS_STADE = {
     "tout juste planté": 0.65,
-    "maturité": 1.0,
-    "floraison": 1.35,
+    "maturité":          1.0,
+    "floraison":         1.35,
 }
 
 
-def aroser(nom_numerote: str, stade: str) -> tuple[float | None, float | None]:
+def temps_avant_prochain_arrosage(instance: dict, plante: dict) -> str:
     """
-    Calcule la quantité d'eau à apporter et met à jour le stock d'eau de la plante.
-    Retourne (eau_a_apporter, eau_actuelle), ou (None, None) si les données sont manquantes.
+    Calcule en combien de secondes le stock d'eau passera sous 10% de la dose nominale.
+    Formule : W * (1 - d)^n = seuil  →  n = log(seuil/W) / log(1-d)
+    d = dissipation par seconde (valeur brute du JSON).
     """
+    eau   = instance["eau_deja_presente"]
+    seuil = plante["eau"] * 0.10
+
+    if eau <= seuil:
+        return "Maintenant !"
+
+    d = plante["dissipation"]
+    if d <= 0 or d >= 1:
+        return "?"
+
+    try:
+        n_secondes = math.log(seuil / eau) / math.log(1 - d)
+        if n_secondes < 0:
+            return "Maintenant !"
+        n_heures = n_secondes / 3600
+        if n_heures < 1:
+            return "< 1h"
+        if n_heures < 24:
+            return f"Dans {int(n_heures)}h"
+        return f"Dans {int(n_heures / 24)}j"
+    except (ValueError, ZeroDivisionError):
+        return "?"
+
+
+def calculer_cycle_arrosage(nom_numerote: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Appelée toutes les heures par le thread de surveillance.
+    - Évapore la fraction d'eau correspondant à l'heure écoulée.
+    - Si le stock descend sous 5 mL : notifie et recharge.
+    Retourne (dose_nominale, eau_actuelle) ou (None, None) si erreur.
+    """
+    global nb_arrosages
     if meteo is None:
         return None, None
 
-    # rstrip("0123456789") retire les chiffres en fin de chaîne pour retrouver le nom d'espèce de base. Ex : "Rose2" → "Rose".
     nom_base = nom_numerote.rstrip("0123456789")
-    plante = next((p for p in data["plantes"] if p["nom_courant"] == nom_base), None)
+    plante   = next((p for p in catalogue["plantes"] if p["nom_courant"] == nom_base), None)
     if plante is None:
         return None, None
 
@@ -130,52 +246,42 @@ def aroser(nom_numerote: str, stade: str) -> tuple[float | None, float | None]:
     if instance is None:
         return None, None
 
-    # Paramètres propres à l'espèce
-    eau = plante["eau"]
-    dissipation_base = plante["dissipation"]
-    ch_min, ch_max = plante["besoin_chaleur_min"], plante["besoin_chaleur_max"]
-    sol_min, sol_max = plante["besoin_soleil_min"], plante["besoin_soleil_max"]
-    ha_min, ha_max = plante["humidite_air_min"], plante["humidite_air_max"]
+    stade = instance.get("stade", "maturité")
+    eau   = plante["eau"]
 
-    # Relevé météo actuel
-    # L'API ne fournit qu'une seule valeur d'humidité (air) ;
-    # on l'utilise comme proxy pour l'humidité ambiante globale.
-    humidite = meteo["current"]["humidity"]
-    soleil = meteo["current"]["uv"]
-    chaleur = meteo["current"]["temp_c"]
+    # dissipation par seconde → on convertit en taux horaire pour l'évaporation heure/heure
+    dissipation_horaire = 3600 * plante["dissipation"]
 
-    stade_mul = MULTIPLICATEURS_STADE.get(stade, 1.0)
+    ch_min, ch_max   = plante["besoin_chaleur_min"],  plante["besoin_chaleur_max"]
+    sol_min, sol_max = plante["besoin_soleil_min"],   plante["besoin_soleil_max"]
+    ha_min, ha_max   = plante["humidite_air_min"],    plante["humidite_air_max"]
 
-    # Pour chaque paramètre, on mesure l'écart entre la valeur idéale (centre de la plage optimale)
-    # et la valeur réelle, normalisé par le demi-écart de la plage.
-    # Un écart positif signifie que les conditions sont moins favorables → plus d'eau nécessaire.
+    humidite = meteo["current"].get("humidity", 60)
+    soleil   = meteo["current"].get("uv", 3)
+    chaleur  = meteo["current"].get("temp_c", 15)
+
+    stade_mul = FACTEURS_STADE.get(stade, 1.0)
+
     eau_a_apporter = eau * stade_mul * (
-            ((ch_min + ch_max) / 2 - chaleur) / ((ch_max - ch_min) / 2) +
-            ((sol_min + sol_max) / 2 - soleil) / ((sol_max - sol_min) / 2) +
-            ((ha_min + ha_max) / 2 - humidite) / ((ha_max - ha_min) / 2)
+        ((ch_min  + ch_max)  / 2 - chaleur)  / ((ch_max  - ch_min)  / 2) +
+        ((sol_min + sol_max) / 2 - soleil)   / ((sol_max - sol_min) / 2) +
+        ((ha_min  + ha_max)  / 2 - humidite) / ((ha_max  - ha_min)  / 2)
     )
-
-    # Plancher à 10 % de la dose de base : même dans des conditions idéales,
-    # une plante a toujours besoin d'un apport minimum en eau.
     eau_a_apporter = max(eau_a_apporter, eau * 0.1)
 
-    # La chaleur et le soleil accélèrent l'évaporation (facteur +),
-    # l'humidité la ralentit (facteur -). Chaque terme est un multiplicateur autour de 1.0.
-    dissipation = dissipation_base * (
-            (1 + 0.020 * (chaleur - (ch_min + ch_max) / 2)) *
-            (1 + 0.030 * (soleil - (sol_min + sol_max) / 2)) *
-            (1 - 0.015 * (humidite - (ha_min + ha_max) / 2))
+    # dissipation horaire ajustée selon les conditions réelles
+    dissipation = dissipation_horaire * (
+        (1 + 0.020 * (chaleur  - (ch_min  + ch_max)  / 2)) *
+        (1 + 0.030 * (soleil   - (sol_min + sol_max) / 2)) *
+        (1 - 0.015 * (humidite - (ha_min  + ha_max)  / 2))
     )
 
-    # On soustrait la fraction d'eau évaporée depuis le dernier passage.
     instance["eau_deja_presente"] -= instance["eau_deja_presente"] * dissipation
 
-    # Si le stock tombe à 5 mL ou moins, on notifie l'utilisateur et on recharge.
-    if instance["eau_deja_presente"] <= 5:
-        notification(
-            f"AROSER {nom_numerote}",
-            f"Votre {nom_numerote} a besoin d'eau !\nQuantité recommandée : {eau_a_apporter:.0f} mL"
-        )
+    seuil_alerte = plante["eau"] * 0.10
+    if instance["eau_deja_presente"] <= seuil_alerte:
+        nb_arrosages += 1
+        ouvrir_notif(f"AROSER {nom_numerote}", f"Votre {nom_numerote} a besoin d'eau !")
         instance["eau_deja_presente"] = eau_a_apporter
 
     return eau_a_apporter, instance["eau_deja_presente"]
@@ -185,40 +291,33 @@ def aroser(nom_numerote: str, stade: str) -> tuple[float | None, float | None]:
 #  Thread de surveillance par plante
 # ─────────────────────────────────────────────────────────────────────────────
 
-def boucle_plante(nom_numerote: str, stade: str) -> None:
-    """Tourne en arrière-plan et recalcule l'arrosage toutes les heures."""
+def surveiller_hydratation(nom_numerote: str) -> None:
+    """Tourne en arrière-plan, vérifie l'hydratation toutes les heures."""
+    instance = next((p for p in jardin["plantes"] if p["nom_numéroté"] == nom_numerote), None)
+    if instance and instance["eau_deja_presente"] <= 0:
+        ouvrir_notif(
+            f"AROSER {nom_numerote}",
+            f"Votre {nom_numerote} vient d'être ajoutée — pensez à l'arroser !"
+        )
+
     while True:
-        eau_a_apporter, eau_actuelle = aroser(nom_numerote, stade)
-        if eau_a_apporter is not None:
-            print(
-                f"[{nom_numerote}] "
-                f"eau à apporter : {eau_a_apporter:.2f} | "
-                f"eau présente : {eau_actuelle:.2f}"
-            )
         time.sleep(3600)
+        dose, niveau = calculer_cycle_arrosage(nom_numerote)
+        if dose is not None:
+            print(f"[{nom_numerote}] dose : {dose:.2f} mL | niveau : {niveau:.2f} mL")
 
 
-def portail_plante(nom_plante: str, stade: str) -> str:
-    """
-    Point d'entrée pour ajouter une plante : incrémente le compteur,
-    enregistre la plante dans le jardin et démarre son thread de surveillance.
-    Retourne le nom numéroté attribué à l'instance.
-    """
-    num = compte(nom_plante)
+def enregistrer_et_surveiller(nom_plante: str, stade: str) -> str:
+    """Numérote la plante, l'ajoute au jardin et lance son thread de surveillance."""
+    num          = incrémenter_compteur(nom_plante)
     nom_numerote = f"{nom_plante}{num}"
-
-    ajouter_plante(nom_plante, nom_numerote)
-
-    # daemon=True : le thread s'arrête automatiquement à la fermeture de la fenêtre.
-    # Sans ça, Python attendrait que tous les threads aient terminé avant de quitter.
-    thread = threading.Thread(target=boucle_plante, args=(nom_numerote, stade), daemon=True)
-    thread.start()
-
+    inscrire_plante_au_jardin(nom_plante, nom_numerote, stade)
+    threading.Thread(target=surveiller_hydratation, args=(nom_numerote,), daemon=True).start()
     return nom_numerote
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Interface graphique (CustomTkinter)
+#  Fenêtre principale
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = CTk()
@@ -226,54 +325,58 @@ app.geometry("360x640")
 app.title("DigiGrow")
 set_appearance_mode("dark")
 
-# Téléchargement et application de l icône de la fenêtre
-try:
-    ico_response = requests.get(
-        "https://raw.githubusercontent.com/poujy/concour-nsi/refs/heads/main/DigiGrow%20/data/DigiGrow.ico"
-    )
-    if ico_response.status_code == 200:
-        ico_path = "DigiGrow.ico"
-        with open(ico_path, "wb") as f:
-            f.write(ico_response.content)
-        app.iconbitmap(ico_path)
-except Exception as e:
-    print("Impossible de charger l icône :", e)
-
-noms_villes = [v["nom_ville"] for v in villes_data["villes"]]
-main_frame = CTkFrame(master=app)
+noms_villes   = [v["nom_ville"] for v in villes_data["villes"]]
+main_frame    = CTkFrame(master=app)
 content_frame = CTkFrame(master=main_frame)
 
 main_frame.pack(fill=BOTH, expand=True)
 content_frame.pack(fill=BOTH, expand=True)
 
 
-# ── Notification ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Notifications thread-safe
+# ─────────────────────────────────────────────────────────────────────────────
 
-def notification(titre: str, texte: str) -> None:
-    """Affiche une fenêtre modale de notification, compatible avec les threads."""
-
-    def _afficher():
+def ouvrir_notif(titre: str, texte: str) -> None:
+    def _construire_fenetre():
         fenetre = CTkToplevel(app)
         fenetre.title(titre)
         fenetre.geometry("300x150")
-        # grab_set() bloque les interactions avec la fenêtre principale
-        # tant que cette notification est ouverte.
         fenetre.grab_set()
         CTkLabel(fenetre, text=titre, font=("Arial", 16, "bold")).pack(pady=20)
         CTkLabel(fenetre, text=texte, font=("Arial", 13)).pack(pady=5)
         CTkButton(fenetre, text="OK", width=100, command=fenetre.destroy).pack(pady=15)
 
-    # app.after(0, ...) planifie l'exécution dans le thread principal Tkinter.
-    # Tkinter n'est pas thread-safe : créer un widget depuis un thread secondaire
-    # provoquerait un crash — ce détour est donc obligatoire.
-    app.after(0, _afficher)
+    app.after(0, _construire_fenetre)
 
 
-# ── Page d'accueil ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Navigation
+# ─────────────────────────────────────────────────────────────────────────────
 
-def afficher_home() -> None:
+def vider_contenu() -> None:
+    for widget in content_frame.winfo_children():
+        widget.destroy()
+
+
+def naviguer_vers(nom: str) -> None:
     vider_contenu()
+    pages = {
+        "Plants":        dessiner_jardin,
+        "Handbook":      dessiner_handbook,
+        "Stats":         dessiner_stats,
+        "AjouterPlante": dessiner_formulaire_ajout,
+    }
+    if nom in pages:
+        pages[nom]()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Page d'accueil — choix de la ville
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dessiner_accueil() -> None:
+    vider_contenu()
     CTkLabel(content_frame, text="DigiGrow", font=("Arial", 28, "bold")).pack(pady=40)
     CTkLabel(content_frame, text="Sélectionnez votre ville", font=("Arial", 18)).pack(pady=10)
 
@@ -281,66 +384,142 @@ def afficher_home() -> None:
     combobox.pack(pady=5)
     combobox.set(noms_villes[0])
 
-    def valider():
-        # "global" permet de modifier la variable définie au niveau du module.
-        # Sans ce mot-clé, Python créerait une variable locale qui disparaîtrait
-        # dès la fin de la fonction.
+    def valider_ville():
         global ville_active
         ville_active = combobox.get()
-        afficher_menu()
-        afficher_page("Plants")
+        monter_barre_navigation()
+        naviguer_vers("Plants")
 
-    CTkButton(content_frame, text="VALIDER", width=200, command=valider).pack(pady=20)
+    CTkButton(content_frame, text="VALIDER", width=200, command=valider_ville).pack(pady=20)
 
 
-# ── Barre de navigation ───────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Barre de navigation
+# ─────────────────────────────────────────────────────────────────────────────
 
-def afficher_menu() -> None:
-    """Crée la barre de navigation en bas de l'écran (appelée une seule fois après le choix de ville)."""
+def monter_barre_navigation() -> None:
     barre = CTkFrame(master=app, height=60)
     barre.pack(side=BOTTOM, fill=X)
 
-    pages = [("📘", "Handbook"), ("🌱", "Plants"), ("📊", "Stats"), ("⚙️", "Settings")]
-    for icone, page in pages:
+    for icone, page in [("📘", "Handbook"), ("🌱", "Plants"), ("📊", "Stats")]:
         CTkButton(
             barre, text=icone, width=60, corner_radius=0,
-            # "lambda p=page" capture la valeur de `page` au moment de la création.
-            # Sans ça, toutes les lambdas pointeraient vers la dernière valeur de la boucle.
-            command=lambda p=page: afficher_page(p)
+            command=lambda p=page: naviguer_vers(p)
         ).pack(side=LEFT, expand=True, fill=BOTH)
 
 
-# ── Pages dynamiques ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Page Mon Jardin
+# ─────────────────────────────────────────────────────────────────────────────
 
-def vider_contenu() -> None:
-    """Supprime tous les widgets du content_frame pour préparer l'affichage d'une nouvelle page."""
-    for widget in content_frame.winfo_children():
-        widget.destroy()
+def recharger_eau_manuellement(nom_numerote: str) -> None:
+    """Remet le stock d'eau à la dose nominale quand l'utilisateur arrose lui-même."""
+    nom_base = nom_numerote.rstrip("0123456789")
+    ref      = next((p for p in catalogue["plantes"] if p["nom_courant"] == nom_base), None)
+    instance = next((p for p in jardin["plantes"] if p["nom_numéroté"] == nom_numerote), None)
 
+    if instance and ref:
+        instance["eau_deja_presente"] = float(ref["eau"])
 
-def afficher_page(nom: str) -> None:
-    vider_contenu()
-
-    if nom == "Plants":
-        page_plants()
-    elif nom == "Handbook":
-        page_handbook()
-    elif nom == "Stats":
-        page_stats()
-    elif nom == "Settings":
-        page_settings()
+    naviguer_vers("Plants")
 
 
-def page_plants() -> None:
-    CTkLabel(content_frame, text="Ajouter une plante", font=("Arial", 22, "bold")).pack(pady=20)
+def dessiner_jardin() -> None:
+    CTkLabel(content_frame, text="🌿 Mon Jardin", font=("Arial", 22, "bold")).pack(pady=(15, 5))
 
-    plantes_dispo = verif_climat_plante(ville_active)
-    valeurs_combo = plantes_dispo if plantes_dispo else ["Aucune plante disponible"]
+    if not jardin["plantes"]:
+        CTkLabel(
+            content_frame,
+            text="Aucune plante pour l'instant.\nAjoutez-en une ci-dessous !",
+            font=("Arial", 13), text_color="#888888", justify="center"
+        ).pack(pady=30)
+    else:
+        scroll = CTkScrollableFrame(content_frame, fg_color="transparent")
+        scroll.pack(fill=BOTH, expand=True, padx=10, pady=5)
 
+        for p in jardin["plantes"]:
+            nom_num  = p["nom_numéroté"]
+            nom_base = p["nom_courant"]
+            stade    = p.get("stade", "maturité")
+            eau_ml   = p["eau_deja_presente"]
+
+            ref     = next((x for x in catalogue["plantes"] if x["nom_courant"] == nom_base), None)
+            eau_max = ref["eau"] if ref else 50
+
+            pct_eau  = max(0.0, min(1.0, eau_ml / eau_max))
+            prochain = temps_avant_prochain_arrosage(p, ref) if ref else "?"
+
+            if pct_eau > 0.6:
+                couleur_barre = "#4CAF50"
+            elif pct_eau > 0.3:
+                couleur_barre = "#FFC107"
+            else:
+                couleur_barre = "#F44336"
+
+            carte = CTkFrame(
+                scroll, corner_radius=12,
+                fg_color=("#2b2b2b", "#1e1e1e"),
+                border_width=1, border_color="#3a3a3a"
+            )
+            carte.pack(fill=X, pady=6, padx=4)
+
+            haut = CTkFrame(carte, fg_color="transparent")
+            haut.pack(fill=X, padx=12, pady=(10, 2))
+            CTkLabel(haut, text=f"🌱 {nom_num}", font=("Arial", 15, "bold"), anchor="w").pack(side=LEFT)
+            CTkLabel(haut, text=stade, font=("Arial", 11), text_color="#888888").pack(side=RIGHT)
+
+            lbl_eau = CTkFrame(carte, fg_color="transparent")
+            lbl_eau.pack(fill=X, padx=12)
+            CTkLabel(lbl_eau, text="💧 Eau", font=("Arial", 11), anchor="w").pack(side=LEFT)
+            # Affichage en cL (1 cL = 10 mL)
+            CTkLabel(lbl_eau, text=f"{eau_ml / 1000:.2f} L", font=("Arial", 11), text_color="#888888").pack(side=RIGHT)
+
+            barre = CTkProgressBar(carte, progress_color=couleur_barre, height=8, corner_radius=4)
+            barre.pack(fill=X, padx=12, pady=(2, 4))
+            barre.set(pct_eau)
+
+            CTkLabel(
+                carte, text=f"⏱ Prochain arrosage : {prochain}",
+                font=("Arial", 11), text_color="#aaaaaa", anchor="w"
+            ).pack(anchor="w", padx=12, pady=(0, 6))
+
+            CTkButton(
+                carte, text="💧 Je l'ai arrosé",
+                width=180, height=30, corner_radius=8,
+                fg_color="#1a6b3a", hover_color="#145c30",
+                font=("Arial", 12),
+                command=lambda n=nom_num: recharger_eau_manuellement(n)
+            ).pack(pady=(0, 10))
+
+    CTkButton(
+        content_frame, text="➕  Ajouter une plante",
+        width=240, height=40, corner_radius=20,
+        command=lambda: naviguer_vers("AjouterPlante")
+    ).pack(pady=10)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Page Ajouter une plante
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dessiner_formulaire_ajout() -> None:
+    CTkButton(
+        content_frame, text="← Retour", width=100,
+        anchor="w", fg_color="transparent",
+        command=lambda: naviguer_vers("Plants")
+    ).pack(anchor="w", padx=10, pady=(10, 0))
+
+    CTkLabel(content_frame, text="➕ Ajouter une plante", font=("Arial", 20, "bold")).pack(pady=(5, 15))
+
+    plantes_dispo  = plantes_compatibles_ville(ville_active)
+    valeurs_combo  = plantes_dispo if plantes_dispo else ["Aucune plante disponible"]
+
+    CTkLabel(content_frame, text="Espèce", font=("Arial", 13)).pack()
     combo_plante = CTkComboBox(content_frame, values=valeurs_combo, state="readonly", width=220)
     combo_plante.pack(pady=5)
     combo_plante.set("Choisissez une plante...")
 
+    CTkLabel(content_frame, text="Stade de développement", font=("Arial", 13)).pack(pady=(10, 0))
     combo_stade = CTkComboBox(
         content_frame,
         values=["tout juste planté", "maturité", "floraison"],
@@ -349,39 +528,123 @@ def page_plants() -> None:
     combo_stade.pack(pady=5)
     combo_stade.set("tout juste planté")
 
-    def ajouter():
-        nom_choisi = combo_plante.get()
-        stade_choisi = combo_stade.get()
-        if nom_choisi not in ("Choisissez une plante...", "Aucune plante disponible"):
-            portail_plante(nom_choisi, stade_choisi)
-            afficher_page("Plants")
+    def confirmer_ajout():
+        nom   = combo_plante.get()
+        stade = combo_stade.get()
+        if nom not in ("Choisissez une plante...", "Aucune plante disponible"):
+            enregistrer_et_surveiller(nom, stade)
+            naviguer_vers("Plants")
 
-    CTkButton(content_frame, text="Ajouter Plante", width=200, command=ajouter).pack(pady=20)
-
-
-def page_handbook() -> None:
-    CTkLabel(content_frame, text="📘 Votre Jardin", font=("Arial", 22, "bold")).pack(pady=20)
-
-    if jardin["plantes"]:
-        for plante in jardin["plantes"]:
-            CTkLabel(content_frame, text=f"🌱 {plante['nom_numéroté']}", font=("Arial", 14)).pack(pady=2)
-    else:
-        CTkLabel(content_frame, text="Aucune plante pour l'instant", font=("Arial", 13)).pack(pady=10)
-
-
-def page_stats() -> None:
-    CTkLabel(content_frame, text="📊 Statistiques", font=("Arial", 22, "bold")).pack(pady=20)
-    CTkLabel(content_frame, text=f"Plantes dans le jardin : {len(jardin['plantes'])}", font=("Arial", 14)).pack(pady=5)
-
-
-def page_settings() -> None:
-    CTkLabel(content_frame, text="⚙️ Paramètres", font=("Arial", 22, "bold")).pack(pady=20)
-    CTkLabel(content_frame, text="(à venir)", font=("Arial", 14)).pack()
+    CTkButton(
+        content_frame, text="Ajouter", width=200, height=40, corner_radius=20,
+        command=confirmer_ajout
+    ).pack(pady=25)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Lancement
+#  Page Handbook
 # ─────────────────────────────────────────────────────────────────────────────
 
-afficher_home()
+def dessiner_handbook() -> None:
+    CTkLabel(content_frame, text="📘 Handbook", font=("Arial", 22, "bold")).pack(pady=(15, 2))
+    CTkLabel(
+        content_frame, text="Sélectionnez une plante pour ses conseils",
+        font=("Arial", 12), text_color="#888888"
+    ).pack(pady=(0, 8))
+
+    scroll = CTkScrollableFrame(content_frame, fg_color="transparent")
+    scroll.pack(fill=BOTH, expand=True, padx=10, pady=5)
+
+    toutes = [p["nom_courant"] for p in catalogue["plantes"]]
+
+    ligne = None
+    for i, nom in enumerate(toutes):
+        col = i % 2
+        if col == 0:
+            ligne = CTkFrame(scroll, fg_color="transparent")
+            ligne.pack(fill=X, pady=3)
+
+        CTkButton(
+            ligne, text=nom, width=155, height=40, corner_radius=10,
+            command=lambda n=nom: ouvrir_fiche_plante(n)
+        ).grid(row=0, column=col, padx=4)
+
+
+def ouvrir_fiche_plante(nom_plante: str) -> None:
+    vider_contenu()
+
+    CTkButton(
+        content_frame, text="← Retour", width=100,
+        anchor="w", fg_color="transparent",
+        command=lambda: naviguer_vers("Handbook")
+    ).pack(anchor="w", padx=10, pady=(10, 0))
+
+    CTkLabel(content_frame, text=f"🌿 {nom_plante}", font=("Arial", 22, "bold")).pack(pady=(5, 4))
+
+    ref = next((p for p in catalogue["plantes"] if p["nom_courant"] == nom_plante), None)
+    if ref:
+        info_frame = CTkFrame(content_frame, corner_radius=10, fg_color=("#2b2b2b", "#1e1e1e"))
+        info_frame.pack(fill=X, padx=15, pady=6)
+
+        for label, valeur in [
+            ("🌡  Température", f"{ref['besoin_chaleur_min']}-{ref['besoin_chaleur_max']} °C"),
+            ("☀️  Soleil (UV)",  f"{ref['besoin_soleil_min']}-{ref['besoin_soleil_max']}"),
+            # Affichage en cL (1 cL = 10 mL)
+            ("💧  Eau / cycle",  f"{ref['eau'] / 1000:.2f} L"),
+            ("💨  Humidité air", f"{ref['humidite_air_min']}-{ref['humidite_air_max']} %"),
+        ]:
+            ligne = CTkFrame(info_frame, fg_color="transparent")
+            ligne.pack(fill=X, padx=12, pady=3)
+            CTkLabel(ligne, text=label, font=("Arial", 12), anchor="w").pack(side=LEFT)
+            CTkLabel(ligne, text=valeur, font=("Arial", 12, "bold"), anchor="e").pack(side=RIGHT)
+
+    conseil_frame = CTkFrame(content_frame, corner_radius=10, fg_color=("#2b2b2b", "#1e1e1e"))
+    conseil_frame.pack(fill=X, padx=15, pady=6)
+    CTkLabel(conseil_frame, text="💡 Conseils", font=("Arial", 13, "bold"), anchor="w").pack(
+        anchor="w", padx=12, pady=(10, 4)
+    )
+    CTkLabel(
+        conseil_frame, text=conseil_pour_plante(nom_plante),
+        font=("Arial", 12), wraplength=300, justify="left", anchor="w"
+    ).pack(anchor="w", padx=12, pady=(0, 12))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Page Statistiques
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dessiner_stats() -> None:
+    CTkLabel(content_frame, text="📊 Statistiques", font=("Arial", 22, "bold")).pack(pady=(15, 10))
+
+    def carte_stat(icone: str, titre: str, valeur: str) -> None:
+        carte = CTkFrame(
+            content_frame, corner_radius=12,
+            fg_color=("#2b2b2b", "#1e1e1e"),
+            border_width=1, border_color="#3a3a3a"
+        )
+        carte.pack(fill=X, padx=15, pady=5)
+        CTkLabel(carte, text=f"{icone}  {titre}", font=("Arial", 12), text_color="#888888", anchor="w").pack(
+            anchor="w", padx=12, pady=(8, 2)
+        )
+        CTkLabel(carte, text=valeur, font=("Arial", 18, "bold"), anchor="w").pack(
+            anchor="w", padx=12, pady=(0, 8)
+        )
+
+    carte_stat("🌱", "Plantes dans le jardin", str(len(jardin["plantes"])))
+    carte_stat("💧", "Arrosages effectués",    str(nb_arrosages))
+    carte_stat("📍", "Ville active",           ville_active or "—")
+
+    if meteo:
+        temp = meteo["current"].get("temp_c", "?")
+        hum  = meteo["current"].get("humidity", "?")
+        cond = traduire_code_meteo(meteo["current"])
+        carte_stat("🌤", "Météo actuelle",    f"{temp} °C — {cond}")
+        carte_stat("💨", "Humidité de l'air", f"{hum} %")
+
+
+###############################################################################
+#  Lancement                                                                  #
+###############################################################################
+
+dessiner_accueil()
 app.mainloop()
